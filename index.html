@@ -205,7 +205,27 @@
         </div>
       </section>
 
-      <!-- 6. Settings Modal -->
+      <!-- 6. Live Debug & Diagnostics Console -->
+      <section class="card debug-card">
+        <div class="debug-header" id="debug-header">
+          <div class="debug-title">
+            <span>🛠️ Live Diagnostics & Debug Console</span>
+            <span class="badge" id="debug-status-badge">Ready</span>
+          </div>
+          <span class="chevron" id="debug-chevron">▼</span>
+        </div>
+        <div id="debug-body" class="debug-body hidden">
+          <div class="debug-toolbar">
+            <button type="button" id="btn-copy-debug-log" class="btn btn-secondary btn-xs">📋 Copy Log</button>
+            <button type="button" id="btn-clear-debug-log" class="text-btn">Clear Log</button>
+          </div>
+          <div id="debug-console" class="debug-console">
+            <div class="debug-line info">[System] App initialized. Ready for receipt uploads.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 7. Settings Modal -->
       <div id="settings-modal" class="collage-modal hidden">
         <div class="collage-modal-content">
           <div class="modal-header">

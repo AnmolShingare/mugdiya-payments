@@ -180,8 +180,14 @@ async function clearStagedSession() {
   updateProcessButtonState();
   try {
     const db = await openDB();
-    const tx = db.transaction('staged_session_files', 'readwrite');
-    tx.objectStore('staged_session_files').clear();
+    await new Promise((resolve) => {
+      const tx = db.transaction(['staged_session_files', 'shared_files'], 'readwrite');
+      tx.objectStore('staged_session_files').clear();
+      tx.objectStore('shared_files').clear();
+      tx.oncomplete = resolve;
+      tx.onerror = resolve;
+    });
+    addDebugLog('Staging area & shared queue cleared in IndexedDB', 'info');
   } catch (err) {
     console.warn('Error clearing staged session:', err);
   }
@@ -205,24 +211,30 @@ function dataURLtoFile(dataurl, filename) {
 async function retrieveSharedFilesFromDB() {
   try {
     const db = await openDB();
-    const tx = db.transaction('shared_files', 'readwrite');
-    const store = tx.objectStore('shared_files');
-    const items = await new Promise((resolve) => {
-      const getAll = store.getAll();
-      getAll.onsuccess = () => resolve(getAll.result || []);
-      getAll.onerror = () => resolve([]);
+    // Atomically read and clear the shared_files object store in the same transaction before yielding to event loop
+    const items = await new Promise((resolve, reject) => {
+      const tx = db.transaction('shared_files', 'readwrite');
+      const store = tx.objectStore('shared_files');
+      const getReq = store.getAll();
+      getReq.onsuccess = () => {
+        store.clear(); // Cleared in the exact same transaction before control yields!
+        tx.oncomplete = () => resolve(getReq.result || []);
+        tx.onerror = (e) => reject(e);
+      };
+      getReq.onerror = (e) => reject(e);
     });
 
-    if (items.length > 0) {
+    if (items && items.length > 0) {
       showToast(`📥 Received ${items.length} shared photo(s) from phone!`);
+      addDebugLog(`📥 Retrieved ${items.length} shared file(s) from phone share menu`, 'info');
       for (const item of items) {
         await addFileToStaging(item.file);
       }
-      store.clear();
       await saveStagedSession();
     }
   } catch (err) {
     console.error('Error retrieving shared files:', err);
+    addDebugLog(`Error retrieving shared files: ${err.message}`, 'error');
   }
 }
 
@@ -959,12 +971,22 @@ btnProcess.addEventListener('click', async () => {
     logText.textContent = '4/4 Finalizing records...';
 
     if (result && result.success) {
-      const match = result.match || {};
-      const statusMsg = match.is_backlog 
-        ? `📦 Saved to Pending Backlog (no matching row found)`
-        : `✅ Linked to Row ${match.matched_row_id}! Drive proof uploaded.`;
+      if (result.pending) {
+        showToast('📦 Saved to Pending Backlog (no matching row found in sheet)', 6000);
+        addDebugLog('📦 Server saved proof to Pending Backlog (no matching row found in sheet)', 'warning');
+      } else {
+        const rowId = result.matched_row_id;
+        showToast(`✅ Linked to Row ${rowId}! Drive proof uploaded.`, 6000);
+        addDebugLog(`✅ Successfully linked proof to Row #${rowId}! File: ${result.file_name}`, 'success');
+      }
 
-      showToast(statusMsg, 5000);
+      if (result.gemini_model && result.gemini_model !== 'none') {
+        addDebugLog(`Gemini AI Model used: ${result.gemini_model}`, 'info');
+      }
+      if (result.gemini_error) {
+        addDebugLog(`Gemini Notice: ${result.gemini_error}`, 'warning');
+      }
+
       dismissErrorBanner();
 
       // Clear staged photos upon successful upload
@@ -976,11 +998,14 @@ btnProcess.addEventListener('click', async () => {
       await loadTransactions();
       await loadPendingBacklog();
     } else {
-      throw new Error(result.error || 'Server processing error');
+      const errDetail = (result && (result.error || result.message)) || 'Server processing error';
+      addDebugLog(`❌ Server returned failure: ${errDetail}`, 'error');
+      throw new Error(errDetail);
     }
 
   } catch (err) {
     console.error('Process error:', err);
+    addDebugLog(`❌ Process error: ${err.message}`, 'error');
     showErrorBanner(err.message);
     showToast(`❌ ${err.message}`, 8000, true);
   } finally {
@@ -1142,6 +1167,72 @@ function showToast(message, duration = 3000, isError = false) {
     toastEl.classList.remove('show');
     setTimeout(() => toastEl.classList.add('hidden'), 300);
   }, duration);
+}
+
+// ============================================================================
+// 10. Live Diagnostics & Debug Console
+// ============================================================================
+const debugHeader = document.getElementById('debug-header');
+const debugBody = document.getElementById('debug-body');
+const debugChevron = document.getElementById('debug-chevron');
+const debugConsole = document.getElementById('debug-console');
+const debugStatusBadge = document.getElementById('debug-status-badge');
+const btnCopyDebugLog = document.getElementById('btn-copy-debug-log');
+const btnClearDebugLog = document.getElementById('btn-clear-debug-log');
+
+function addDebugLog(msg, type = 'info') {
+  if (!debugConsole) return;
+  const now = new Date();
+  const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+  const line = document.createElement('div');
+  line.className = `debug-line ${type}`;
+  line.textContent = `[${timeStr}] ${msg}`;
+  debugConsole.appendChild(line);
+  debugConsole.scrollTop = debugConsole.scrollHeight;
+
+  if (debugStatusBadge) {
+    if (type === 'error') {
+      debugStatusBadge.textContent = 'Error';
+      debugStatusBadge.style.background = '#ef4444';
+      if (debugBody && debugBody.classList.contains('hidden')) {
+        debugBody.classList.remove('hidden');
+        if (debugChevron) debugChevron.textContent = '▲';
+      }
+    } else if (type === 'success') {
+      debugStatusBadge.textContent = 'Success';
+      debugStatusBadge.style.background = '#10b981';
+    }
+  }
+}
+
+if (debugHeader) {
+  debugHeader.addEventListener('click', () => {
+    debugBody.classList.toggle('hidden');
+    debugChevron.textContent = debugBody.classList.contains('hidden') ? '▼' : '▲';
+  });
+}
+
+if (btnCopyDebugLog) {
+  btnCopyDebugLog.addEventListener('click', () => {
+    const text = Array.from(debugConsole.querySelectorAll('.debug-line'))
+      .map(el => el.textContent)
+      .join('\n');
+    navigator.clipboard.writeText(text).then(() => {
+      showToast('📋 Debug log copied to clipboard!');
+    }).catch(() => {
+      showToast('Log copied (fallback)');
+    });
+  });
+}
+
+if (btnClearDebugLog) {
+  btnClearDebugLog.addEventListener('click', () => {
+    debugConsole.innerHTML = '<div class="debug-line info">[System] Log cleared. Ready.</div>';
+    if (debugStatusBadge) {
+      debugStatusBadge.textContent = 'Ready';
+      debugStatusBadge.style.background = '';
+    }
+  });
 }
 
 // Start application

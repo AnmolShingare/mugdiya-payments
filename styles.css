@@ -1182,3 +1182,81 @@ input:checked + .slider:before {
   background: #334155;
   border-radius: 3px;
 }
+
+/* Live Debug & Diagnostics Console */
+.debug-card {
+  margin-top: 14px;
+  background: #0b1120;
+  border: 1px solid #1e293b;
+}
+
+.debug-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.debug-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.debug-body {
+  padding: 0 14px 14px 14px;
+}
+
+.debug-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  margin-bottom: 8px;
+}
+
+.btn-xs {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.debug-console {
+  background: #030712;
+  border: 1px solid #1f2937;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 180px;
+  overflow-y: auto;
+  color: #94a3b8;
+}
+
+.debug-line {
+  word-break: break-all;
+  white-space: pre-wrap;
+  margin-bottom: 3px;
+}
+
+.debug-line.info {
+  color: #38bdf8;
+}
+
+.debug-line.success {
+  color: #34d399;
+}
+
+.debug-line.warning {
+  color: #facc15;
+}
+
+.debug-line.error {
+  color: #f87171;
+  font-weight: 600;
+}
