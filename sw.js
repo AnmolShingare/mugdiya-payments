@@ -1,9 +1,9 @@
 /**
- * Service Worker for Mugdiya Receipts PWA (v2.3)
+ * Service Worker for Mugdiya Receipts PWA (v2.5)
  * Intercepts Web Share Target POST requests from Android OS and manages offline caching.
  */
 
-const CACHE_NAME = 'mugdiya-receipts-v2.3';
+const CACHE_NAME = 'mugdiya-receipts-v2.5';
 const ASSETS_TO_CACHE = [
   './',
   'index.html',

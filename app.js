@@ -404,9 +404,19 @@ function renderStagedList() {
 
     let tagClass = 'tag-other';
     let tagLabel = 'Doc';
-    if (item.category === 'INVOICE') { tagClass = 'tag-invoice'; tagLabel = '1. 📄 Invoice'; }
-    if (item.category === 'UPI_SCREENSHOT') { tagClass = 'tag-upi'; tagLabel = '2. 💳 UPI Proof'; }
-    if (item.category === 'PRODUCT_PHOTO') { tagClass = 'tag-product'; tagLabel = '3. 📷 Work/Photo'; }
+    if (item.isExistingProof) {
+      tagClass = 'tag-existing';
+      tagLabel = '💳 Existing Proof (from Sheet)';
+    } else if (item.category === 'INVOICE') {
+      tagClass = 'tag-invoice';
+      tagLabel = '1. 📄 Invoice';
+    } else if (item.category === 'UPI_SCREENSHOT') {
+      tagClass = 'tag-upi';
+      tagLabel = '2. 💳 UPI Proof';
+    } else if (item.category === 'PRODUCT_PHOTO') {
+      tagClass = 'tag-product';
+      tagLabel = '3. 📷 Work/Photo';
+    }
 
     el.innerHTML = `
       <div class="staged-thumb-box">
@@ -830,16 +840,55 @@ function updateSelectedBanner() {
 
 window.clearTargetSelection = function() {
   state.selectedRowId = null;
+  state.stagedFiles = state.stagedFiles.filter(f => !f.isExistingProof);
+  renderStagedList();
   renderTransactionList();
+  updateSelectedBanner();
+  updateProcessButtonState();
 };
 
-function selectTransaction(rowId) {
+async function selectTransaction(rowId) {
   if (state.selectedRowId === rowId) {
     state.selectedRowId = null;
+    state.stagedFiles = state.stagedFiles.filter(f => !f.isExistingProof);
+    renderStagedList();
   } else {
     state.selectedRowId = rowId;
+    const tx = state.transactions.find(t => t.row_id === rowId);
+    if (tx && tx.has_proof) {
+      state.stagedFiles = state.stagedFiles.filter(f => !f.isExistingProof);
+      addDebugLog(`🔍 Row #${rowId} has an existing proof in Sheet. Loading it for merged film roll...`, 'info');
+      showToast(`📥 Loading existing proof from Row #${rowId} to merge...`, 3000);
+      try {
+        const backendUrl = getBackendUrl();
+        const resp = await fetch(`${backendUrl}?action=get_proof_image&row_id=${rowId}`);
+        const data = await resp.json();
+        if (data && data.success && data.data_url) {
+          const proofFile = dataURLtoFile(data.data_url, data.file_name || 'Existing_Proof.jpg');
+          state.stagedFiles.push({
+            id: 'existing-proof-' + rowId,
+            file: proofFile,
+            name: data.file_name || 'Existing Payment Proof.jpg',
+            dataUrl: data.data_url,
+            category: 'UPI_SCREENSHOT',
+            isExistingProof: true,
+            sourceRowId: rowId
+          });
+          renderStagedList();
+          addDebugLog(`✅ Existing proof loaded as Card #2! Both will be stitched into a unified film roll.`, 'success');
+          showToast(`✅ Existing proof loaded! Both will be merged into a single film roll.`, 4000);
+        }
+      } catch (e) {
+        addDebugLog(`Notice: Could not load existing proof: ${e.message}`, 'warning');
+      }
+    } else {
+      state.stagedFiles = state.stagedFiles.filter(f => !f.isExistingProof);
+      renderStagedList();
+    }
   }
   renderTransactionList();
+  updateSelectedBanner();
+  updateProcessButtonState();
 }
 
 if (aiModeToggle) {
@@ -905,6 +954,8 @@ btnProcess.addEventListener('click', async () => {
   state.isProcessing = true;
   updateProcessButtonState();
   processLog.classList.remove('hidden');
+  const enteredNotes = userNotes.value.trim();
+  addDebugLog(`📝 User Notes included: ${enteredNotes ? ('"' + enteredNotes + '"') : '(None)'}`, 'info');
   logText.textContent = '1/4 Assembling vertical film roll...';
 
   try {
@@ -966,6 +1017,46 @@ btnProcess.addEventListener('click', async () => {
         body: formData
       });
       result = await resp.json();
+    }
+
+    if (result && result.needs_client_merge) {
+      logText.textContent = `✨ Auto-merging with existing proof on Row #${result.matched_row_id}...`;
+      addDebugLog(`📥 Row #${result.matched_row_id} has existing payment proof in Sheet. Auto-stitching composite film roll...`, 'info');
+
+      const existingProofFile = dataURLtoFile(result.existing_proof_b64, result.existing_proof_name || 'Existing_Proof.jpg');
+      state.stagedFiles.push({
+        id: 'existing-proof-' + result.matched_row_id,
+        file: existingProofFile,
+        name: result.existing_proof_name || 'Existing Payment Proof.jpg',
+        dataUrl: result.existing_proof_b64,
+        category: 'UPI_SCREENSHOT',
+        isExistingProof: true,
+        sourceRowId: result.matched_row_id
+      });
+      renderStagedList();
+
+      const mergedCollageBlob = await renderCollageOnCanvas();
+      const mergedDataUrl = await readFileAsDataURL(mergedCollageBlob);
+      const mergedBase64 = mergedDataUrl.split(',')[1];
+
+      logText.textContent = '3/4 Uploading merged film roll to Google Drive & updating sheet...';
+      const mergePayload = {
+        action: "process_and_link",
+        stitchedImageBase64: mergedBase64,
+        stitchedMime: "image/jpeg",
+        tickedRowId: result.matched_row_id,
+        skipMergeHandshake: true,
+        fileName: result.suggested_filename,
+        userInstructions: userNotes.value.trim(),
+        useAi: false
+      };
+
+      const mergeResp = await fetch(backendUrl, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(mergePayload)
+      });
+      result = await mergeResp.json();
     }
 
     logText.textContent = '4/4 Finalizing records...';

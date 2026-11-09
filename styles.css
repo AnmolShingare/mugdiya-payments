@@ -1260,3 +1260,9 @@ input:checked + .slider:before {
   color: #f87171;
   font-weight: 600;
 }
+
+.tag-existing {
+  background: #ede9fe;
+  color: #6b21a8;
+  border: 1px solid #c084fc;
+}
