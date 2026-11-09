@@ -29,10 +29,11 @@
     "params": {
       "title": "title",
       "text": "text",
+      "url": "url",
       "files": [
         {
           "name": "receipt_images",
-          "accept": ["image/*", "application/pdf", ".pdf"]
+          "accept": ["image/*", "application/pdf", ".pdf", "application/x-pdf"]
         }
       ]
     }
