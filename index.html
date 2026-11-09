@@ -49,8 +49,8 @@
         <div id="drop-zone" class="drop-zone">
           <div class="drop-zone-prompt">
             <div class="upload-icon-circle">📸</div>
-            <p class="drop-text"><strong>Share directly</strong> from GPay/PhonePe/Gallery</p>
-            <p class="drop-sub">or tap below to select/snap photos</p>
+            <p class="drop-text"><strong>Share directly</strong> from GPay/PhonePe/Gallery/Adobe Scan</p>
+            <p class="drop-sub">Photos, UPI screenshots, or multi-page PDFs</p>
           </div>
           <div class="upload-buttons-row">
             <label class="btn btn-secondary upload-btn">
@@ -58,8 +58,8 @@
               <input type="file" id="camera-input" accept="image/*" capture="environment" hidden>
             </label>
             <label class="btn btn-secondary upload-btn">
-              📁 Choose Files
-              <input type="file" id="file-input" accept="image/*" multiple hidden>
+              📁 Choose Files / PDF
+              <input type="file" id="file-input" accept="image/*,application/pdf" multiple hidden>
             </label>
           </div>
         </div>
@@ -128,6 +128,21 @@
           <span class="tx-badge-count" id="tx-count">0 loaded</span>
         </div>
 
+        <!-- Unified AI Toggle Box -->
+        <div class="ai-toggle-box">
+          <div class="ai-toggle-left">
+            <span class="ai-toggle-icon">🤖</span>
+            <div>
+              <div class="ai-toggle-title">Gemini AI Audit & Filename Engine</div>
+              <div class="ai-toggle-sub" id="ai-toggle-sub">Active: Uses AI to cross-check receipts against sheet and auto-format audit filenames</div>
+            </div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="ai-mode-toggle" checked>
+            <span class="slider round"></span>
+          </label>
+        </div>
+
         <!-- 3 Segmented Filter Tabs -->
         <div class="filter-tabs">
           <button type="button" class="tab-btn active" data-filter="all">All (<span id="count-all">0</span>)</button>
@@ -141,16 +156,8 @@
           <button id="btn-clear-search" class="btn-clear-search hidden">✕</button>
         </div>
 
-        <!-- Auto-Match AI Radio Option -->
-        <div class="tx-options-bar">
-          <label class="tx-radio-label">
-            <input type="radio" name="tx-select" value="auto" checked>
-            <span>🤖 <strong>Auto-Match with AI</strong> (Recommended)</span>
-          </label>
-        </div>
-
-        <!-- Selected Transaction Notice Banner -->
-        <div id="selected-tx-banner" class="selected-tx-banner hidden"></div>
+        <!-- Selected Transaction & Context Banner -->
+        <div id="selected-tx-banner" class="selected-tx-banner"></div>
 
         <!-- Scrollable list of recent transactions -->
         <div id="tx-list" class="tx-list">
@@ -226,6 +233,7 @@
     <div id="toast" class="toast hidden"></div>
   </div>
 
+  <script src="vendor/pdf.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

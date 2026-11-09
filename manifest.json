@@ -32,7 +32,7 @@
       "files": [
         {
           "name": "receipt_images",
-          "accept": ["image/*"]
+          "accept": ["image/*", "application/pdf", ".pdf"]
         }
       ]
     }

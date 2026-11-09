@@ -30,12 +30,18 @@ function setBackendUrl(url) {
 const state = {
   stagedFiles: [],       // Array of { id, file, dataUrl, category, name, rotation }
   transactions: [],      // LIFO transactions from Google Sheets
-  selectedRowId: null,   // Explicitly ticked transaction row
+  selectedRowId: null,   // Explicitly referenced transaction row
   isProcessing: false,
   activeFilter: 'all',   // 'all' | 'needs_proof' | 'has_proof'
   searchTerm: "",
-  zoomLevel: 1.0         // Modal canvas zoom level
+  zoomLevel: 1.0,        // Modal canvas zoom level
+  aiActive: true         // AI Enabled for verification & filename generation
 };
+
+// Initialize PDF.js worker for client-side scanned document extraction
+if (window.pdfjsLib) {
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
+}
 
 // DOM Elements
 const dropZone = document.getElementById('drop-zone');
@@ -66,6 +72,8 @@ const btnZoomOut = document.getElementById('btn-zoom-out');
 const btnZoomReset = document.getElementById('btn-zoom-reset');
 const zoomLevelEl = document.getElementById('zoom-level');
 const selectedTxBanner = document.getElementById('selected-tx-banner');
+const aiModeToggle = document.getElementById('ai-mode-toggle');
+const aiToggleSub = document.getElementById('ai-toggle-sub');
 const errorBanner = document.getElementById('error-banner');
 const errorBannerText = document.getElementById('error-banner-text');
 const errorBannerActions = document.getElementById('error-banner-actions');
@@ -249,20 +257,91 @@ async function initApp() {
 // ============================================================================
 // 3. File Staging, Categorization & Rotation
 // ============================================================================
+
+async function extractImagesFromPdf(file) {
+  if (!window.pdfjsLib) {
+    throw new Error('PDF processing library (pdf.js) is not loaded.');
+  }
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = window.pdfjsLib.getDocument({ data: arrayBuffer });
+  const pdfDoc = await loadingTask.promise;
+  const numPages = pdfDoc.numPages;
+  const results = [];
+
+  for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+    const page = await pdfDoc.getPage(pageNum);
+    // 2.0x scale gives crisp ~1600-2400px images for high clarity of receipt text & figures
+    const viewport = page.getViewport({ scale: 2.0 });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+
+    await page.render({
+      canvasContext: ctx,
+      viewport: viewport
+    }).promise;
+
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+    const cleanBase = file.name.replace(/\.pdf$/i, '');
+    const pageName = numPages > 1 
+      ? `${cleanBase}_Page_${pageNum}.jpg`
+      : `${cleanBase}.jpg`;
+
+    results.push({
+      name: pageName,
+      dataUrl: dataUrl,
+      category: 'INVOICE' // Scanned PDFs from Adobe Scan are bills/invoices
+    });
+  }
+
+  return results;
+}
+
 async function addFileToStaging(file) {
-  if (!file || !file.type.startsWith('image/')) return;
+  if (!file) return;
 
-  const dataUrl = await readFileAsDataURL(file);
-  const guessedCategory = guessCategory(file.name);
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  const isImage = file.type.startsWith('image/');
 
-  state.stagedFiles.push({
-    id: Date.now() + Math.random(),
-    file: file,
-    dataUrl: dataUrl,
-    category: guessedCategory,
-    name: file.name,
-    rotation: 0
-  });
+  if (!isPdf && !isImage) {
+    showToast(`Skipped non-image/non-pdf file: ${file.name}`, 3000, true);
+    return;
+  }
+
+  if (isPdf) {
+    showToast(`📄 Extracting page image(s) from ${file.name}...`, 2500);
+    try {
+      const extractedPages = await extractImagesFromPdf(file);
+      for (const page of extractedPages) {
+        state.stagedFiles.push({
+          id: Date.now() + Math.random(),
+          file: dataURLtoFile(page.dataUrl, page.name),
+          dataUrl: page.dataUrl,
+          category: page.category,
+          name: page.name,
+          rotation: 0
+        });
+      }
+      showToast(`✅ Extracted ${extractedPages.length} scanned page(s) from PDF!`);
+    } catch (pdfErr) {
+      console.error('PDF extraction failed:', pdfErr);
+      showToast(`❌ Could not extract pages from PDF: ${pdfErr.message}`, 6000, true);
+      return;
+    }
+  } else {
+    const dataUrl = await readFileAsDataURL(file);
+    const guessedCategory = guessCategory(file.name);
+
+    state.stagedFiles.push({
+      id: Date.now() + Math.random(),
+      file: file,
+      dataUrl: dataUrl,
+      category: guessedCategory,
+      name: file.name,
+      rotation: 0
+    });
+  }
 
   autoSortStagedFiles();
   await saveStagedSession();
@@ -674,7 +753,7 @@ function renderTransactionList() {
     }
 
     item.innerHTML = `
-      <input type="radio" name="tx-select" class="tx-radio" value="${t.row_id}" ${isSelected ? 'checked' : ''}>
+      <div class="tx-target-pill">${isSelected ? '🎯' : '○'}</div>
       <div class="tx-info">
         <div class="tx-row-top">
           <span class="tx-particulars">${t.particulars || 'Untitled'}</span>
@@ -696,42 +775,71 @@ function renderTransactionList() {
 function updateSelectedBanner() {
   if (!selectedTxBanner) return;
 
-  if (!state.selectedRowId) {
-    selectedTxBanner.classList.add('hidden');
-    selectedTxBanner.innerHTML = '';
-    return;
-  }
+  if (state.selectedRowId) {
+    const selectedTx = state.transactions.find(t => t.row_id === state.selectedRowId);
+    if (!selectedTx) {
+      state.selectedRowId = null;
+      updateSelectedBanner();
+      return;
+    }
 
-  const selectedTx = state.transactions.find(t => t.row_id === state.selectedRowId);
-  if (!selectedTx) {
-    selectedTxBanner.classList.add('hidden');
-    return;
-  }
+    selectedTxBanner.classList.remove('hidden');
+    selectedTxBanner.className = 'selected-tx-banner is-targeted' + (selectedTx.has_proof ? ' has-proof' : '');
 
-  selectedTxBanner.classList.remove('hidden');
-  if (selectedTx.has_proof) {
-    selectedTxBanner.className = 'selected-tx-banner has-proof';
+    let aiNote = state.aiActive
+      ? `🤖 <strong>AI Context:</strong> Gemini will cross-examine your receipt against this row, check for extra labour / partial refunds, and format the audit filename.`
+      : `⚡ <strong>Direct Link:</strong> Receipt will link directly to Row #${selectedTx.row_id} without AI call.`;
+
+    if (selectedTx.has_proof) {
+      aiNote += `<br><span style="font-size:10px; color:#fde68a;">⚠️ Existing proof attached. Uploading will merge into an updated film roll.</span>`;
+    }
+
     selectedTxBanner.innerHTML = `
-      <strong>ℹ️ Existing Proof Linked:</strong> Row #${selectedTx.row_id} (${selectedTx.particulars} - ₹${selectedTx.amount}) already has proof file.
-      <br><span style="font-size:10px; color:#e2e8f0;">Stitching will merge new photos into an updated film roll and replace the old file in Google Drive.</span>
+      <div class="selected-tx-content">
+        <div>🎯 <strong>Target Row #${selectedTx.row_id}:</strong> ${selectedTx.particulars || 'Untitled'} (₹${selectedTx.amount || 0} on ${selectedTx.date || ''})</div>
+        <div style="font-size:10px; margin-top:2px;">${aiNote}</div>
+      </div>
+      <button type="button" class="btn-clear-target" onclick="clearTargetSelection()">✕ Auto-Match</button>
     `;
   } else {
+    selectedTxBanner.classList.remove('hidden');
     selectedTxBanner.className = 'selected-tx-banner';
-    selectedTxBanner.innerHTML = `
-      <strong>Selected Target:</strong> Row #${selectedTx.row_id}: ${selectedTx.particulars} (₹${selectedTx.amount} on ${selectedTx.date}).
-    `;
+    if (state.aiActive) {
+      selectedTxBanner.innerHTML = `
+        <span>🤖 <strong>AI Auto-Match Mode:</strong> Gemini AI will scan your receipt and match it to the correct row in Google Sheets. (Or tap any transaction below to target it explicitly).</span>
+      `;
+    } else {
+      selectedTxBanner.innerHTML = `
+        <span>⚠️ <strong>Direct Link Mode:</strong> Please tap a transaction below to select which row to attach your proof to, or turn ON Gemini AI above.</span>
+      `;
+    }
   }
 }
+
+window.clearTargetSelection = function() {
+  state.selectedRowId = null;
+  renderTransactionList();
+};
 
 function selectTransaction(rowId) {
   if (state.selectedRowId === rowId) {
     state.selectedRowId = null;
-    const autoRadio = document.querySelector('input[name="tx-select"][value="auto"]');
-    if (autoRadio) autoRadio.checked = true;
   } else {
     state.selectedRowId = rowId;
   }
   renderTransactionList();
+}
+
+if (aiModeToggle) {
+  aiModeToggle.addEventListener('change', (e) => {
+    state.aiActive = e.target.checked;
+    if (aiToggleSub) {
+      aiToggleSub.textContent = state.aiActive
+        ? "Active: Uses AI to cross-check receipts against sheet and auto-format audit filenames"
+        : "Disabled: Fast direct link mode without calling Gemini AI";
+    }
+    updateSelectedBanner();
+  });
 }
 
 // Filter Tab Click Handlers
@@ -762,15 +870,6 @@ if (btnClearSearch) {
   });
 }
 
-document.querySelectorAll('input[name="tx-select"]').forEach((radio) => {
-  radio.addEventListener('change', (e) => {
-    if (e.target.value === 'auto') {
-      state.selectedRowId = null;
-      renderTransactionList();
-    }
-  });
-});
-
 btnRefresh.addEventListener('click', async () => {
   showToast('Refreshing sheet records...');
   await loadTransactions();
@@ -786,6 +885,11 @@ function updateProcessButtonState() {
 btnProcess.addEventListener('click', async () => {
   if (state.stagedFiles.length === 0 || state.isProcessing) return;
 
+  if (!state.aiActive && !state.selectedRowId) {
+    showToast('⚠️ Please tap a row to link, or enable Gemini AI above!', 4000, true);
+    return;
+  }
+
   state.isProcessing = true;
   updateProcessButtonState();
   processLog.classList.remove('hidden');
@@ -794,7 +898,9 @@ btnProcess.addEventListener('click', async () => {
   try {
     const collageBlob = await renderCollageOnCanvas();
 
-    logText.textContent = '2/4 Analyzing with Gemini AI...';
+    logText.textContent = state.aiActive 
+      ? '2/4 Analyzing with Gemini AI...' 
+      : '2/4 Linking proof directly to row...';
 
     const backendUrl = getBackendUrl();
     const isGAS = backendUrl.includes("script.google.com");
@@ -816,7 +922,8 @@ btnProcess.addEventListener('click', async () => {
         stitchedImageBase64: stitchedBase64,
         userInstructions: userNotes.value.trim(),
         tickedRowId: state.selectedRowId || null,
-        fileNames: state.stagedFiles.map(f => f.name)
+        fileNames: state.stagedFiles.map(f => f.name),
+        useAi: state.aiActive
       };
 
       logText.textContent = '3/4 Uploading to Google Drive & updating sheet...';
@@ -833,6 +940,7 @@ btnProcess.addEventListener('click', async () => {
       formData.append("count", state.stagedFiles.length);
       formData.append("user_notes", userNotes.value.trim());
       formData.append("ticked_row_id", state.selectedRowId || "");
+      formData.append("use_ai", state.aiActive ? "true" : "false");
 
       state.stagedFiles.forEach((item, idx) => {
         formData.append(`file_${idx}`, item.file);
