@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Mugdiya Payments & Proofs</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="header-content">
+        <div class="brand">
+          <div class="brand-icon">🏢</div>
+          <div>
+            <h1 class="brand-title">Mugdiya Payments</h1>
+            <p class="brand-sub">Apartment Audit Trail & Proof Linker</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <span id="sync-status" class="status-pill status-online" title="Connected to Google Sheets">
+            <span class="dot"></span> Live
+          </span>
+          <button id="btn-refresh" class="icon-btn" title="Refresh Google Sheet Records">
+            🔄
+          </button>
+          <button id="btn-settings" class="icon-btn" title="Cloud Engine Settings">
+            ⚙️
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="app-body">
+      <!-- 1. Staging / Upload Area -->
+      <section class="card upload-card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="step-num">1</span> Attach Proofs
+          </div>
+          <span class="tag-hint">Invoice ➔ UPI Screenshot ➔ Photos</span>
+        </div>
+
+        <div id="drop-zone" class="drop-zone">
+          <div class="drop-zone-prompt">
+            <div class="upload-icon-circle">📸</div>
+            <p class="drop-text"><strong>Share directly</strong> from GPay/PhonePe/Gallery</p>
+            <p class="drop-sub">or tap below to select/snap photos</p>
+          </div>
+          <div class="upload-buttons-row">
+            <label class="btn btn-secondary upload-btn">
+              📷 Snap Photo
+              <input type="file" id="camera-input" accept="image/*" capture="environment" hidden>
+            </label>
+            <label class="btn btn-secondary upload-btn">
+              📁 Choose Files
+              <input type="file" id="file-input" accept="image/*" multiple hidden>
+            </label>
+          </div>
+        </div>
+
+        <!-- Staged Images List (Reorderable) -->
+        <div id="staged-container" class="staged-container hidden">
+          <div class="staged-header">
+            <span class="staged-count">Staged Images (<span id="img-count">0</span>)</span>
+            <button id="btn-clear-images" class="text-btn danger">Clear</button>
+          </div>
+          <div id="staged-list" class="staged-list"></div>
+          
+          <!-- Live Film Roll Collage Preview Toggle -->
+          <div class="collage-preview-toggle">
+            <button id="btn-preview-collage" class="btn btn-outline btn-sm">
+              🎞️ Preview Film Roll Collage
+            </button>
+          </div>
+          <div id="collage-modal" class="collage-modal hidden">
+            <div class="collage-modal-content">
+              <div class="modal-header">
+                <h3>Vertical Film Roll Preview</h3>
+                <button id="btn-close-modal" class="icon-btn">✕</button>
+              </div>
+              <div class="collage-canvas-box">
+                <canvas id="collage-canvas"></canvas>
+                <img id="collage-img-preview" class="collage-preview-img hidden" alt="Collage preview">
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Text Instructions -->
+      <section class="card notes-card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="step-num">2</span> Optional Instructions
+          </div>
+        </div>
+        <textarea id="user-notes" class="input-textarea" rows="2" 
+          placeholder="E.g., 'Base bill ₹1350, paid ₹1580 because ₹230 was extra labour' or 'Iron grill final payment'"></textarea>
+      </section>
+
+      <!-- 3. Transaction Selector (LIFO / Descending) -->
+      <section class="card tx-card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="step-num">3</span> Reference Sheet Transaction
+          </div>
+          <span class="tx-badge-count" id="tx-count">0 loaded</span>
+        </div>
+
+        <div class="tx-search-bar">
+          <input type="text" id="tx-search" class="input-search" placeholder="🔍 Search by amount (e.g. 1580) or particulars...">
+          <button id="btn-filter-unlinked" class="filter-pill" data-active="false">Missing Proof Only</button>
+        </div>
+
+        <div class="tx-options-bar">
+          <label class="tx-radio-label">
+            <input type="radio" name="tx-select" value="auto" checked>
+            <span>🤖 <strong>Auto-Match with AI</strong> (Recommended)</span>
+          </label>
+        </div>
+
+        <!-- Scrollable list of recent transactions -->
+        <div id="tx-list" class="tx-list">
+          <div class="loading-spinner">Loading transactions from Google Sheets...</div>
+        </div>
+      </section>
+
+      <!-- 4. Action Button -->
+      <section class="action-card">
+        <button id="btn-process" class="btn btn-primary btn-lg btn-block" disabled>
+          🚀 Stitch & Link to Google Sheet
+        </button>
+        <div id="process-log" class="process-log hidden">
+          <div class="spinner-small"></div>
+          <span id="log-text">Processing...</span>
+        </div>
+      </section>
+
+      <!-- 5. Pending Backlog Drawer / Accordion -->
+      <section class="card backlog-card">
+        <div class="backlog-header" id="backlog-header">
+          <div class="backlog-title">
+            <span>📦 Pending / Unlinked Backlog</span>
+            <span class="badge" id="backlog-count">0</span>
+          </div>
+          <span class="chevron" id="backlog-chevron">▼</span>
+        </div>
+        <div id="backlog-body" class="backlog-body hidden">
+          <p class="backlog-info">Receipts uploaded before entering into Google Sheets. Click to link or reconcile automatically.</p>
+          <div id="backlog-list" class="backlog-list">
+            <p class="empty-text">No pending receipts.</p>
+          </div>
+          <button id="btn-clear-backlog" class="btn btn-secondary btn-sm btn-block">
+            ⚡ Auto-Match All Pending Receipts
+          </button>
+        </div>
+      </section>
+      <!-- 6. Settings Modal -->
+      <div id="settings-modal" class="collage-modal hidden">
+        <div class="collage-modal-content">
+          <div class="modal-header">
+            <h3>⚙️ 24/7 Cloud Engine Settings</h3>
+            <button id="btn-close-settings" class="icon-btn">✕</button>
+          </div>
+          <div style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
+            <p style="font-size: 12px; color: var(--text-muted);">
+              Google Apps Script 24/7 Web App URL:
+            </p>
+            <input type="text" id="backend-url-input" class="input-search" style="font-size: 11px;">
+            <div style="display: flex; gap: 8px;">
+              <button id="btn-save-settings" class="btn btn-primary btn-sm" style="flex: 1;">Save & Sync</button>
+              <button id="btn-reset-settings" class="btn btn-secondary btn-sm">Reset Default</button>
+            </div>
+            <p style="font-size: 11px; color: var(--text-dim); line-height: 1.4;">
+              💡 This allows the PWA to link transactions, upload receipts to Google Drive, and update Google Sheets 24/7 without needing your laptop.
+            </p>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Bottom Toast Notification -->
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
