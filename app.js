@@ -66,6 +66,10 @@ const btnZoomOut = document.getElementById('btn-zoom-out');
 const btnZoomReset = document.getElementById('btn-zoom-reset');
 const zoomLevelEl = document.getElementById('zoom-level');
 const selectedTxBanner = document.getElementById('selected-tx-banner');
+const errorBanner = document.getElementById('error-banner');
+const errorBannerText = document.getElementById('error-banner-text');
+const errorBannerActions = document.getElementById('error-banner-actions');
+const btnCloseError = document.getElementById('btn-close-error');
 const toastEl = document.getElementById('toast');
 const backlogHeader = document.getElementById('backlog-header');
 const backlogBody = document.getElementById('backlog-body');
@@ -853,6 +857,7 @@ btnProcess.addEventListener('click', async () => {
         : `✅ Linked to Row ${match.matched_row_id}! Drive proof uploaded.`;
 
       showToast(statusMsg, 5000);
+      dismissErrorBanner();
 
       // Clear staged photos upon successful upload
       await clearStagedSession();
@@ -868,13 +873,56 @@ btnProcess.addEventListener('click', async () => {
 
   } catch (err) {
     console.error('Process error:', err);
-    showToast(`❌ Error: ${err.message}`, 6000);
+    showErrorBanner(err.message);
+    showToast(`❌ ${err.message}`, 8000, true);
   } finally {
     state.isProcessing = false;
     updateProcessButtonState();
     processLog.classList.add('hidden');
   }
 });
+
+function showErrorBanner(msg) {
+  if (!errorBanner) return;
+  errorBanner.classList.remove('hidden');
+
+  const lower = String(msg).toLowerCase();
+  if (lower.includes('drive') || lower.includes('permission')) {
+    errorBannerText.innerHTML = `
+      <strong>Google Drive Authorization Required:</strong><br>
+      Google Apps Script requires one-time permission to create folders and save receipt images in your Google Drive.
+      <br><br>
+      <strong>Quick Fix (10 seconds):</strong><br>
+      1. Open your <a href="https://docs.google.com/spreadsheets/d/1cuCEboha8hScEnzrfSbQlAjeKbxVi-2uKDos8Bz1Hu8/edit" target="_blank" style="color:#38bdf8; text-decoration:underline; font-weight:700;">Google Sheet</a> on desktop or phone.<br>
+      2. In the top navigation menu, click <strong>🤖 AI Agent Context</strong> ➔ <strong>📂 Authorize Google Drive & PWA Access</strong>.<br>
+      3. Click <strong>OK / Allow</strong> on the Google permission popup.<br>
+      4. Return here and tap <strong>Retry Now</strong> below!
+    `;
+    errorBannerActions.innerHTML = `
+      <button type="button" class="btn btn-primary btn-sm" onclick="retryProcess()">🔄 Retry Now</button>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="dismissErrorBanner()">Dismiss</button>
+    `;
+  } else {
+    errorBannerText.textContent = msg;
+    errorBannerActions.innerHTML = `
+      <button type="button" class="btn btn-primary btn-sm" onclick="retryProcess()">🔄 Retry Now</button>
+      <button type="button" class="btn btn-secondary btn-sm" onclick="dismissErrorBanner()">Dismiss</button>
+    `;
+  }
+}
+
+window.dismissErrorBanner = function() {
+  if (errorBanner) errorBanner.classList.add('hidden');
+};
+
+window.retryProcess = function() {
+  window.dismissErrorBanner();
+  btnProcess.click();
+};
+
+if (btnCloseError) {
+  btnCloseError.addEventListener('click', window.dismissErrorBanner);
+}
 
 // ============================================================================
 // 7. Pending Backlog Management
@@ -978,10 +1026,10 @@ btnResetSettings.addEventListener('click', () => {
 // ============================================================================
 // 9. Toast Notification Helper
 // ============================================================================
-function showToast(message, duration = 3000) {
+function showToast(message, duration = 3000, isError = false) {
   toastEl.textContent = message;
+  toastEl.className = isError ? 'toast toast-error show' : 'toast toast-success show';
   toastEl.classList.remove('hidden');
-  toastEl.classList.add('show');
   setTimeout(() => {
     toastEl.classList.remove('show');
     setTimeout(() => toastEl.classList.add('hidden'), 300);
