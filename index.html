@@ -64,11 +64,11 @@
           </div>
         </div>
 
-        <!-- Staged Images List (Reorderable) -->
+        <!-- Staged Images List (Reorderable with Rotate & Persistent Storage) -->
         <div id="staged-container" class="staged-container hidden">
           <div class="staged-header">
             <span class="staged-count">Staged Images (<span id="img-count">0</span>)</span>
-            <button id="btn-clear-images" class="text-btn danger">Clear</button>
+            <button id="btn-clear-images" class="text-btn danger">Clear All</button>
           </div>
           <div id="staged-list" class="staged-list"></div>
           
@@ -78,15 +78,30 @@
               🎞️ Preview Film Roll Collage
             </button>
           </div>
+          
+          <!-- Interactive Preview Modal with Zoom, Pan & Fit -->
           <div id="collage-modal" class="collage-modal hidden">
             <div class="collage-modal-content">
               <div class="modal-header">
-                <h3>Vertical Film Roll Preview</h3>
-                <button id="btn-close-modal" class="icon-btn">✕</button>
+                <div class="modal-title-group">
+                  <h3>Vertical Film Roll Preview</h3>
+                  <span id="canvas-dim" class="badge-dim">1200px</span>
+                </div>
+                <div class="zoom-controls">
+                  <button id="btn-zoom-out" class="zoom-btn" title="Zoom Out">🔍−</button>
+                  <span id="zoom-level" class="zoom-level">100%</span>
+                  <button id="btn-zoom-in" class="zoom-btn" title="Zoom In">🔍+</button>
+                  <button id="btn-zoom-reset" class="zoom-btn" title="Fit to Screen">1:1</button>
+                  <button id="btn-close-modal" class="icon-btn close-btn">✕</button>
+                </div>
               </div>
-              <div class="collage-canvas-box">
-                <canvas id="collage-canvas"></canvas>
-                <img id="collage-img-preview" class="collage-preview-img hidden" alt="Collage preview">
+              <div id="collage-canvas-box" class="collage-canvas-box">
+                <div id="canvas-transform-wrapper" class="canvas-transform-wrapper">
+                  <canvas id="collage-canvas"></canvas>
+                </div>
+              </div>
+              <div class="modal-footer-hint">
+                💡 Tip: Tap + / − to zoom in on handwriting, or drag to pan around.
               </div>
             </div>
           </div>
@@ -104,7 +119,7 @@
           placeholder="E.g., 'Base bill ₹1350, paid ₹1580 because ₹230 was extra labour' or 'Iron grill final payment'"></textarea>
       </section>
 
-      <!-- 3. Transaction Selector (LIFO / Descending) -->
+      <!-- 3. Transaction Selector (LIFO / Descending with Robust Amount & Text Search) -->
       <section class="card tx-card">
         <div class="card-header">
           <div class="card-title">
@@ -113,17 +128,29 @@
           <span class="tx-badge-count" id="tx-count">0 loaded</span>
         </div>
 
-        <div class="tx-search-bar">
-          <input type="text" id="tx-search" class="input-search" placeholder="🔍 Search by amount (e.g. 1580) or particulars...">
-          <button id="btn-filter-unlinked" class="filter-pill" data-active="false">Missing Proof Only</button>
+        <!-- 3 Segmented Filter Tabs -->
+        <div class="filter-tabs">
+          <button type="button" class="tab-btn active" data-filter="all">All (<span id="count-all">0</span>)</button>
+          <button type="button" class="tab-btn" data-filter="needs_proof">Needs Proof ⚠️ (<span id="count-needs-proof">0</span>)</button>
+          <button type="button" class="tab-btn" data-filter="has_proof">Has Proof ✅ (<span id="count-has-proof">0</span>)</button>
         </div>
 
+        <!-- Search Bar -->
+        <div class="tx-search-bar">
+          <input type="text" id="tx-search" class="input-search" placeholder="🔍 Search amount (e.g. 1215), vendor, row #...">
+          <button id="btn-clear-search" class="btn-clear-search hidden">✕</button>
+        </div>
+
+        <!-- Auto-Match AI Radio Option -->
         <div class="tx-options-bar">
           <label class="tx-radio-label">
             <input type="radio" name="tx-select" value="auto" checked>
             <span>🤖 <strong>Auto-Match with AI</strong> (Recommended)</span>
           </label>
         </div>
+
+        <!-- Selected Transaction Notice Banner -->
+        <div id="selected-tx-banner" class="selected-tx-banner hidden"></div>
 
         <!-- Scrollable list of recent transactions -->
         <div id="tx-list" class="tx-list">
@@ -146,13 +173,13 @@
       <section class="card backlog-card">
         <div class="backlog-header" id="backlog-header">
           <div class="backlog-title">
-            <span>📦 Pending / Unlinked Backlog</span>
+            <span>📦 Unlinked Uploads Backlog</span>
             <span class="badge" id="backlog-count">0</span>
           </div>
           <span class="chevron" id="backlog-chevron">▼</span>
         </div>
         <div id="backlog-body" class="backlog-body hidden">
-          <p class="backlog-info">Receipts uploaded before entering into Google Sheets. Click to link or reconcile automatically.</p>
+          <p class="backlog-info">Receipts shared to the app before entering into Google Sheets. Click to link or reconcile automatically.</p>
           <div id="backlog-list" class="backlog-list">
             <p class="empty-text">No pending receipts.</p>
           </div>
@@ -161,6 +188,7 @@
           </button>
         </div>
       </section>
+
       <!-- 6. Settings Modal -->
       <div id="settings-modal" class="collage-modal hidden">
         <div class="collage-modal-content">

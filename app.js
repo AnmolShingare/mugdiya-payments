@@ -1,7 +1,13 @@
 /**
- * Mugdiya Payments & Proofs - Client Application Logic
- * Integrates Web Share Target, Canvas film-roll stitcher, live Google Sheets sync,
- * and 24/7 Google Apps Script Cloud Engine.
+ * Mugdiya Payments & Proofs - Client Application Logic (v2.1)
+ * Features:
+ * 1. Persistent IndexedDB Staging Store (never loses files when switching apps on Android).
+ * 2. Web Share Target Integration (PhonePe, GPay, Gallery).
+ * 3. Amount & Text Search Normalization (matches "1215" to "1,215", row IDs, particulars).
+ * 4. 3 Filter Tabs: All, Needs Proof ⚠️, Has Proof ✅ with real-time badges.
+ * 5. High-Resolution Film-Roll Canvas Generator with document framing and rotation (90°).
+ * 6. Interactive Pinch/Touch/Button Zoom & Pan in Modal Viewer.
+ * 7. 24/7 Cloud Google Apps Script Engine Integration.
  */
 
 const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbzTppDp1hOHABvwbkNz3mxju013tHcyIUUwC-JfUxiWDHT7tkBtmUAjpgx1NJi4XCQ/exec";
@@ -22,12 +28,13 @@ function setBackendUrl(url) {
 
 // Application State
 const state = {
-  stagedFiles: [],       // Array of { file, dataUrl, category, name }
+  stagedFiles: [],       // Array of { id, file, dataUrl, category, name, rotation }
   transactions: [],      // LIFO transactions from Google Sheets
   selectedRowId: null,   // Explicitly ticked transaction row
   isProcessing: false,
-  filterUnlinkedOnly: false,
-  searchTerm: ""
+  activeFilter: 'all',   // 'all' | 'needs_proof' | 'has_proof'
+  searchTerm: "",
+  zoomLevel: 1.0         // Modal canvas zoom level
 };
 
 // DOM Elements
@@ -42,7 +49,7 @@ const userNotes = document.getElementById('user-notes');
 const txList = document.getElementById('tx-list');
 const txCountEl = document.getElementById('tx-count');
 const txSearch = document.getElementById('tx-search');
-const btnFilterUnlinked = document.getElementById('btn-filter-unlinked');
+const btnClearSearch = document.getElementById('btn-clear-search');
 const btnProcess = document.getElementById('btn-process');
 const processLog = document.getElementById('process-log');
 const logText = document.getElementById('log-text');
@@ -52,6 +59,13 @@ const btnPreviewCollage = document.getElementById('btn-preview-collage');
 const collageModal = document.getElementById('collage-modal');
 const btnCloseModal = document.getElementById('btn-close-modal');
 const collageCanvas = document.getElementById('collage-canvas');
+const canvasTransformWrapper = document.getElementById('canvas-transform-wrapper');
+const canvasDimEl = document.getElementById('canvas-dim');
+const btnZoomIn = document.getElementById('btn-zoom-in');
+const btnZoomOut = document.getElementById('btn-zoom-out');
+const btnZoomReset = document.getElementById('btn-zoom-reset');
+const zoomLevelEl = document.getElementById('zoom-level');
+const selectedTxBanner = document.getElementById('selected-tx-banner');
 const toastEl = document.getElementById('toast');
 const backlogHeader = document.getElementById('backlog-header');
 const backlogBody = document.getElementById('backlog-body');
@@ -67,59 +81,169 @@ const backendUrlInput = document.getElementById('backend-url-input');
 const btnSaveSettings = document.getElementById('btn-save-settings');
 const btnResetSettings = document.getElementById('btn-reset-settings');
 
+// Tab Filter Buttons
+const tabButtons = document.querySelectorAll('.tab-btn');
+const countAllEl = document.getElementById('count-all');
+const countNeedsProofEl = document.getElementById('count-needs-proof');
+const countHasProofEl = document.getElementById('count-has-proof');
+
 // ============================================================================
-// 1. Service Worker & Web Share Target Retrieval
+// 1. Persistent IndexedDB Storage (Never Lose Staged Photos Across Shares)
 // ============================================================================
-async function initServiceWorker() {
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('MugdiyaShareDB', 2);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains('shared_files')) {
+        db.createObjectStore('shared_files', { keyPath: 'id', autoIncrement: true });
+      }
+      if (!db.objectStoreNames.contains('staged_session_files')) {
+        db.createObjectStore('staged_session_files', { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = (event) => resolve(event.target.result);
+    request.onerror = (err) => reject(err);
+  });
+}
+
+async function saveStagedSession() {
+  try {
+    const db = await openDB();
+    const tx = db.transaction('staged_session_files', 'readwrite');
+    const store = tx.objectStore('staged_session_files');
+    await new Promise((resolve, reject) => {
+      const clearReq = store.clear();
+      clearReq.onsuccess = resolve;
+      clearReq.onerror = reject;
+    });
+
+    for (const item of state.stagedFiles) {
+      // Store plain serializable object in IndexedDB
+      store.add({
+        id: item.id,
+        name: item.name,
+        category: item.category,
+        dataUrl: item.dataUrl,
+        type: item.file ? item.file.type : 'image/jpeg',
+        rotation: item.rotation || 0
+      });
+    }
+  } catch (err) {
+    console.warn('Error saving staged session to IndexedDB:', err);
+  }
+}
+
+async function loadStagedSession() {
+  try {
+    const db = await openDB();
+    const tx = db.transaction('staged_session_files', 'readonly');
+    const store = tx.objectStore('staged_session_files');
+    const items = await new Promise((resolve, reject) => {
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = reject;
+    });
+
+    if (items.length > 0) {
+      state.stagedFiles = items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        category: item.category,
+        dataUrl: item.dataUrl,
+        rotation: item.rotation || 0,
+        file: dataURLtoFile(item.dataUrl, item.name)
+      }));
+      renderStagedList();
+      updateProcessButtonState();
+    }
+  } catch (err) {
+    console.warn('Error loading staged session from IndexedDB:', err);
+  }
+}
+
+async function clearStagedSession() {
+  state.stagedFiles = [];
+  renderStagedList();
+  updateProcessButtonState();
+  try {
+    const db = await openDB();
+    const tx = db.transaction('staged_session_files', 'readwrite');
+    tx.objectStore('staged_session_files').clear();
+  } catch (err) {
+    console.warn('Error clearing staged session:', err);
+  }
+}
+
+// Convert dataURL back to File object
+function dataURLtoFile(dataurl, filename) {
+  const arr = dataurl.split(',');
+  const mimeMatch = arr[0].match(/:(.*?);/);
+  const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
+  }
+  return new File([u8arr], filename, { type: mime });
+}
+
+// Retrieve any newly shared files from the Service Worker
+async function retrieveSharedFilesFromDB() {
+  try {
+    const db = await openDB();
+    const tx = db.transaction('shared_files', 'readwrite');
+    const store = tx.objectStore('shared_files');
+    const items = await new Promise((resolve) => {
+      const getAll = store.getAll();
+      getAll.onsuccess = () => resolve(getAll.result || []);
+      getAll.onerror = () => resolve([]);
+    });
+
+    if (items.length > 0) {
+      showToast(`📥 Received ${items.length} shared photo(s) from phone!`);
+      for (const item of items) {
+        await addFileToStaging(item.file);
+      }
+      store.clear();
+      await saveStagedSession();
+    }
+  } catch (err) {
+    console.error('Error retrieving shared files:', err);
+  }
+}
+
+// ============================================================================
+// 2. Service Worker Registration & Initialization
+// ============================================================================
+async function initApp() {
   if ('serviceWorker' in navigator) {
     try {
       await navigator.serviceWorker.register('./sw.js');
-      console.log('Service Worker registered successfully');
+      console.log('Service Worker active');
     } catch (err) {
-      console.warn('Service Worker registration failed:', err);
+      console.warn('Service Worker registration note:', err);
     }
   }
 
-  // Check if opened via Android Share Target
+  // 1. Load any persistent staged photos from previous app session
+  await loadStagedSession();
+
+  // 2. Check if launched via Android Web Share Target
   const urlParams = new URLSearchParams(window.location.search);
   if (urlParams.get('shared') === '1') {
     await retrieveSharedFilesFromDB();
     window.history.replaceState({}, document.title, window.location.pathname);
   }
-}
 
-async function retrieveSharedFilesFromDB() {
-  return new Promise((resolve) => {
-    const request = indexedDB.open('MugdiyaShareDB', 1);
-    request.onsuccess = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains('shared_files')) {
-        resolve();
-        return;
-      }
-      const tx = db.transaction('shared_files', 'readwrite');
-      const store = tx.objectStore('shared_files');
-      const getAll = store.getAll();
-
-      getAll.onsuccess = async () => {
-        const items = getAll.result || [];
-        if (items.length > 0) {
-          showToast(`📥 Received ${items.length} shared photo(s) from phone!`);
-          for (const item of items) {
-            await addFileToStaging(item.file);
-          }
-          store.clear();
-        }
-        resolve();
-      };
-      getAll.onerror = () => resolve();
-    };
-    request.onerror = () => resolve();
-  });
+  // 3. Load transactions from Google Sheets
+  await loadTransactions();
+  await loadPendingBacklog();
 }
 
 // ============================================================================
-// 2. File Staging & Categorization
+// 3. File Staging, Categorization & Rotation
 // ============================================================================
 async function addFileToStaging(file) {
   if (!file || !file.type.startsWith('image/')) return;
@@ -132,50 +256,51 @@ async function addFileToStaging(file) {
     file: file,
     dataUrl: dataUrl,
     category: guessedCategory,
-    name: file.name
+    name: file.name,
+    rotation: 0
   });
 
   autoSortStagedFiles();
+  await saveStagedSession();
   renderStagedList();
   updateProcessButtonState();
 }
 
 function guessCategory(fileName) {
   const lower = fileName.toLowerCase();
-  if (lower.includes('invoice') || lower.includes('bill') || lower.includes('scan') || lower.includes('receipt') || lower.includes('estimate')) {
+  if (lower.includes('invoice') || lower.includes('bill') || lower.includes('estimate') || lower.includes('receipt') && !lower.includes('phonepe') && !lower.includes('gpay')) {
     return 'INVOICE';
-  } else if (lower.includes('phonepe') || lower.includes('gpay') || lower.includes('screenshot') || lower.includes('paytm') || lower.includes('upi')) {
+  }
+  if (lower.includes('phonepe') || lower.includes('gpay') || lower.includes('paytm') || lower.includes('screenshot') || lower.includes('upi') || lower.includes('transaction')) {
     return 'UPI_SCREENSHOT';
-  } else if (lower.includes('work') || lower.includes('motor') || lower.includes('pipe') || lower.includes('grill') || lower.includes('material')) {
+  }
+  if (lower.includes('photo') || lower.includes('work') || lower.includes('material') || lower.includes('pipe') || lower.includes('motor')) {
     return 'PRODUCT_PHOTO';
   }
-  return 'OTHER';
+  return 'OTHER_DOC';
 }
 
 function autoSortStagedFiles() {
-  const priority = { 'INVOICE': 1, 'UPI_SCREENSHOT': 2, 'PRODUCT_PHOTO': 3, 'OTHER': 4 };
-  state.stagedFiles.sort((a, b) => (priority[a.category] || 4) - (priority[b.category] || 4));
-}
-
-function readFileAsDataURL(file) {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = (e) => resolve(e.target.result);
-    reader.readAsDataURL(file);
+  const priority = {
+    'INVOICE': 1,
+    'UPI_SCREENSHOT': 2,
+    'PRODUCT_PHOTO': 3,
+    'OTHER_DOC': 4
+  };
+  state.stagedFiles.sort((a, b) => {
+    return (priority[a.category] || 99) - (priority[b.category] || 99);
   });
 }
 
 function renderStagedList() {
-  const count = state.stagedFiles.length;
-  imgCountEl.textContent = count;
-
-  if (count === 0) {
+  if (state.stagedFiles.length === 0) {
     stagedContainer.classList.add('hidden');
-    dropZone.classList.remove('hidden');
+    imgCountEl.textContent = '0';
     return;
   }
 
   stagedContainer.classList.remove('hidden');
+  imgCountEl.textContent = state.stagedFiles.length;
   stagedList.innerHTML = '';
 
   state.stagedFiles.forEach((item, index) => {
@@ -183,58 +308,90 @@ function renderStagedList() {
     el.className = 'staged-item';
 
     let tagClass = 'tag-other';
-    let tagLabel = 'Other';
-    if (item.category === 'INVOICE') {
-      tagClass = 'tag-invoice';
-      tagLabel = '1. 📄 Invoice';
-    } else if (item.category === 'UPI_SCREENSHOT') {
-      tagClass = 'tag-upi';
-      tagLabel = '2. 📱 UPI Screenshot';
-    } else if (item.category === 'PRODUCT_PHOTO') {
-      tagClass = 'tag-product';
-      tagLabel = '3. 📷 Work/Material';
-    }
+    let tagLabel = 'Doc';
+    if (item.category === 'INVOICE') { tagClass = 'tag-invoice'; tagLabel = '1. 📄 Invoice'; }
+    if (item.category === 'UPI_SCREENSHOT') { tagClass = 'tag-upi'; tagLabel = '2. 💳 UPI Proof'; }
+    if (item.category === 'PRODUCT_PHOTO') { tagClass = 'tag-product'; tagLabel = '3. 📷 Work/Photo'; }
 
     el.innerHTML = `
       <div class="staged-thumb-box">
-        <img class="staged-thumb" src="${item.dataUrl}" alt="thumb">
+        <img src="${item.dataUrl}" class="staged-thumb" alt="${item.name}">
         <div class="staged-meta">
-          <span class="staged-name">${item.name || 'Image ' + (index + 1)}</span>
+          <span class="staged-name" title="${item.name}">${item.name}</span>
           <span class="staged-tag ${tagClass}">${tagLabel}</span>
         </div>
       </div>
       <div class="staged-actions">
-        <button class="btn-arrow" onclick="moveStagedItem(${index}, -1)" ${index === 0 ? 'disabled' : ''}>▲</button>
-        <button class="btn-arrow" onclick="moveStagedItem(${index}, 1)" ${index === count - 1 ? 'disabled' : ''}>▼</button>
-        <button class="text-btn danger" onclick="removeStagedItem(${index})">✕</button>
+        <button type="button" class="btn-rotate" title="Rotate 90° Clockwise" onclick="rotateFile(${item.id})">🔄</button>
+        <button type="button" class="btn-arrow" title="Move Up" ${index === 0 ? 'disabled style="opacity:0.3"' : ''} onclick="moveFile(${index}, -1)">▲</button>
+        <button type="button" class="btn-arrow" title="Move Down" ${index === state.stagedFiles.length - 1 ? 'disabled style="opacity:0.3"' : ''} onclick="moveFile(${index}, 1)">▼</button>
+        <button type="button" class="btn-arrow danger" title="Remove" onclick="removeFile(${item.id})">✕</button>
       </div>
     `;
     stagedList.appendChild(el);
   });
 }
 
-window.moveStagedItem = function(index, delta) {
+window.moveFile = async function(index, delta) {
   const target = index + delta;
   if (target < 0 || target >= state.stagedFiles.length) return;
   const temp = state.stagedFiles[index];
   state.stagedFiles[index] = state.stagedFiles[target];
   state.stagedFiles[target] = temp;
+  await saveStagedSession();
   renderStagedList();
 };
 
-window.removeStagedItem = function(index) {
-  state.stagedFiles.splice(index, 1);
+window.removeFile = async function(id) {
+  state.stagedFiles = state.stagedFiles.filter(item => item.id !== id);
+  await saveStagedSession();
   renderStagedList();
   updateProcessButtonState();
 };
 
-btnClearImages.addEventListener('click', () => {
-  state.stagedFiles = [];
+window.rotateFile = async function(id) {
+  const item = state.stagedFiles.find(f => f.id === id);
+  if (!item) return;
+
+  showToast('Rotating photo 90°...');
+  const img = new Image();
+  img.src = item.dataUrl;
+  await new Promise(r => img.onload = r);
+
+  const canvas = document.createElement('canvas');
+  // Swap width & height for 90 degree rotation
+  canvas.width = img.height;
+  canvas.height = img.width;
+  const ctx = canvas.getContext('2d');
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(90 * Math.PI / 180);
+  ctx.drawImage(img, -img.width / 2, -img.height / 2);
+
+  item.dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+  item.rotation = ((item.rotation || 0) + 90) % 360;
+  item.file = dataURLtoFile(item.dataUrl, item.name);
+
+  await saveStagedSession();
   renderStagedList();
-  updateProcessButtonState();
+};
+
+btnClearImages.addEventListener('click', async () => {
+  if (confirm('Clear all staged photos?')) {
+    await clearStagedSession();
+    showToast('Staged photos cleared.');
+  }
 });
 
-// Drop Zone Events
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Upload & Camera Listeners
 dropZone.addEventListener('dragover', (e) => {
   e.preventDefault();
   dropZone.classList.add('drag-over');
@@ -247,101 +404,162 @@ dropZone.addEventListener('dragleave', () => {
 dropZone.addEventListener('drop', async (e) => {
   e.preventDefault();
   dropZone.classList.remove('drag-over');
-  if (e.dataTransfer.files) {
-    for (const file of e.dataTransfer.files) {
-      await addFileToStaging(file);
-    }
+  const files = Array.from(e.dataTransfer.files);
+  for (const f of files) {
+    await addFileToStaging(f);
   }
 });
 
 fileInput.addEventListener('change', async (e) => {
-  if (e.target.files) {
-    for (const file of e.target.files) {
-      await addFileToStaging(file);
-    }
+  const files = Array.from(e.target.files);
+  for (const f of files) {
+    await addFileToStaging(f);
   }
   fileInput.value = '';
 });
 
 cameraInput.addEventListener('change', async (e) => {
-  if (e.target.files) {
-    for (const file of e.target.files) {
-      await addFileToStaging(file);
-    }
+  const files = Array.from(e.target.files);
+  for (const f of files) {
+    await addFileToStaging(f);
   }
   cameraInput.value = '';
 });
 
-window.addEventListener('paste', async (e) => {
-  if (e.clipboardData && e.clipboardData.items) {
-    for (const item of e.clipboardData.items) {
-      if (item.type.startsWith('image/')) {
-        const file = item.getAsFile();
-        if (file) {
-          showToast('📋 Image pasted from clipboard!');
-          await addFileToStaging(file);
-        }
-      }
-    }
-  }
-});
-
 // ============================================================================
-// 3. Client-Side HTML5 Canvas Vertical Film Roll Stitcher
+// 4. Enhanced High-Resolution Film Roll Canvas Stitcher (Bug 1 Fix)
 // ============================================================================
 async function renderCollageOnCanvas() {
   if (state.stagedFiles.length === 0) return null;
 
   const targetWidth = 1200;
-  const dividerHeight = 8;
-  const dividerColor = '#1e293b';
+  const paddingX = 24;
+  const cardSpacing = 28;
+  const headerHeight = 44;
+  const innerContentWidth = targetWidth - (paddingX * 2);
 
+  // Load all images asynchronously
   const loadedImages = await Promise.all(
     state.stagedFiles.map((item) => {
       return new Promise((resolve) => {
         const img = new Image();
-        img.onload = () => resolve(img);
+        img.onload = () => resolve({ img, item });
         img.src = item.dataUrl;
       });
     })
   );
 
-  let totalHeight = 0;
-  const scaledHeights = loadedImages.map((img) => {
-    const scaledH = Math.round((targetWidth / img.width) * img.height);
-    totalHeight += scaledH;
-    return scaledH;
+  // Calculate scaled dimensions with aspect ratio preservation
+  let totalHeight = cardSpacing;
+  const renderedCards = loadedImages.map(({ img, item }, idx) => {
+    const scaledH = Math.round((innerContentWidth / img.width) * img.height);
+    const cardHeight = scaledH + headerHeight;
+    totalHeight += cardHeight + cardSpacing;
+    return { img, item, scaledH, cardHeight, idx };
   });
-
-  totalHeight += dividerHeight * (loadedImages.length - 1);
 
   collageCanvas.width = targetWidth;
   collageCanvas.height = totalHeight;
   const ctx = collageCanvas.getContext('2d');
 
-  let currentY = 0;
-  loadedImages.forEach((img, idx) => {
-    const h = scaledHeights[idx];
-    ctx.drawImage(img, 0, currentY, targetWidth, h);
-    currentY += h;
+  // 1. Draw modern dark background
+  ctx.fillStyle = '#090d16';
+  ctx.fillRect(0, 0, targetWidth, totalHeight);
 
-    if (idx < loadedImages.length - 1) {
-      ctx.fillStyle = dividerColor;
-      ctx.fillRect(0, currentY, targetWidth, dividerHeight);
-      currentY += dividerHeight;
-    }
+  // 2. Draw each document inside a clean card frame
+  let currentY = cardSpacing;
+
+  renderedCards.forEach(({ img, item, scaledH, cardHeight, idx }) => {
+    // Card Container Background & Shadow
+    ctx.fillStyle = '#0f172a';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 2;
+
+    // Rounded rectangle card
+    const cardX = paddingX;
+    const cardY = currentY;
+    const cardW = innerContentWidth;
+    const cardH = cardHeight;
+    const radius = 12;
+
+    ctx.beginPath();
+    ctx.moveTo(cardX + radius, cardY);
+    ctx.lineTo(cardX + cardW - radius, cardY);
+    ctx.quadraticCurveTo(cardX + cardW, cardY, cardX + cardW, cardY + radius);
+    ctx.lineTo(cardX + cardW, cardY + cardH - radius);
+    ctx.quadraticCurveTo(cardX + cardW, cardY + cardH, cardX + cardW - radius, cardY + cardH);
+    ctx.lineTo(cardX + radius, cardY + cardH);
+    ctx.quadraticCurveTo(cardX, cardY + cardH, cardX, cardY + cardH - radius);
+    ctx.lineTo(cardX, cardY + radius);
+    ctx.quadraticCurveTo(cardX, cardY, cardX + radius, cardY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Document Header Bar
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(cardX + 2, cardY + 2, cardW - 4, headerHeight - 2);
+
+    // Header Label & Category
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
+    let categoryTitle = `Document ${idx + 1}`;
+    if (item.category === 'INVOICE') categoryTitle = `📄 ${idx + 1}. INVOICE / BILL ESTIMATE`;
+    if (item.category === 'UPI_SCREENSHOT') categoryTitle = `💳 ${idx + 1}. PHONEPE / GPAY PAYMENT PROOF`;
+    if (item.category === 'PRODUCT_PHOTO') categoryTitle = `📷 ${idx + 1}. SITE WORK / MATERIAL PHOTO`;
+    ctx.fillText(categoryTitle, cardX + 16, cardY + 28);
+
+    // Draw Document Image inside Card
+    ctx.drawImage(img, cardX, cardY + headerHeight, cardW, scaledH);
+
+    currentY += cardHeight + cardSpacing;
   });
+
+  if (canvasDimEl) {
+    canvasDimEl.textContent = `${targetWidth} × ${totalHeight}px`;
+  }
 
   return new Promise((resolve) => {
     collageCanvas.toBlob((blob) => {
       resolve(blob);
-    }, 'image/jpeg', 0.88);
+    }, 'image/jpeg', 0.92);
   });
 }
+
+// Modal Zoom & Pan Handlers
+function updateModalZoom() {
+  if (canvasTransformWrapper) {
+    canvasTransformWrapper.style.transform = `scale(${state.zoomLevel})`;
+  }
+  if (zoomLevelEl) {
+    zoomLevelEl.textContent = `${Math.round(state.zoomLevel * 100)}%`;
+  }
+}
+
+btnZoomIn.addEventListener('click', () => {
+  if (state.zoomLevel < 3.0) {
+    state.zoomLevel = Math.min(3.0, state.zoomLevel + 0.25);
+    updateModalZoom();
+  }
+});
+
+btnZoomOut.addEventListener('click', () => {
+  if (state.zoomLevel > 0.4) {
+    state.zoomLevel = Math.max(0.4, state.zoomLevel - 0.25);
+    updateModalZoom();
+  }
+});
+
+btnZoomReset.addEventListener('click', () => {
+  state.zoomLevel = 1.0;
+  updateModalZoom();
+});
 
 btnPreviewCollage.addEventListener('click', async () => {
   showToast('Generating film roll preview...');
   await renderCollageOnCanvas();
+  state.zoomLevel = 1.0;
+  updateModalZoom();
   collageModal.classList.remove('hidden');
 });
 
@@ -350,7 +568,7 @@ btnCloseModal.addEventListener('click', () => {
 });
 
 // ============================================================================
-// 4. Google Sheets Transactions (LIFO Sync)
+// 5. Google Sheets Transactions (Robust Search & 3-Tab Filter)
 // ============================================================================
 async function loadTransactions() {
   syncStatus.className = 'status-pill';
@@ -362,10 +580,10 @@ async function loadTransactions() {
   try {
     let res, data;
     if (isGAS) {
-      res = await fetch(`${backendUrl}?action=get_transactions&limit=60`);
+      res = await fetch(`${backendUrl}?action=get_transactions&limit=80`);
       data = await res.json();
     } else {
-      res = await fetch('/api/transactions?limit=60');
+      res = await fetch('/api/transactions?limit=80');
       data = await res.json();
     }
 
@@ -381,26 +599,49 @@ async function loadTransactions() {
     console.error('Transactions load error:', err);
     syncStatus.className = 'status-pill';
     syncStatus.style.color = '#ef4444';
-    syncStatus.innerHTML = '⚠️ Offline';
-    txList.innerHTML = `<p class="empty-text">Error loading transactions: ${err.message}. Check Cloud Engine Settings.</p>`;
+    syncStatus.innerHTML = '<span class="dot" style="background:#ef4444"></span> Offline';
   }
 }
 
 function renderTransactionList() {
   let list = [...state.transactions];
 
-  if (state.filterUnlinkedOnly) {
+  // 1. Calculate Real-Time Tab Counts
+  const countAll = state.transactions.length;
+  const countNeedsProof = state.transactions.filter(t => !t.has_proof).length;
+  const countHasProof = state.transactions.filter(t => t.has_proof).length;
+
+  if (countAllEl) countAllEl.textContent = countAll;
+  if (countNeedsProofEl) countNeedsProofEl.textContent = countNeedsProof;
+  if (countHasProofEl) countHasProofEl.textContent = countHasProof;
+
+  // 2. Apply Segmented Tab Filter
+  if (state.activeFilter === 'needs_proof') {
     list = list.filter((t) => !t.has_proof);
+  } else if (state.activeFilter === 'has_proof') {
+    list = list.filter((t) => t.has_proof);
   }
 
+  // 3. Apply Robust Amount, Row ID & Text Search (Bug 3 Fix)
   if (state.searchTerm) {
-    const q = state.searchTerm.toLowerCase();
-    list = list.filter((t) => 
-      t.particulars.toLowerCase().includes(q) ||
-      t.amount.toLowerCase().includes(q) ||
-      t.date.toLowerCase().includes(q) ||
-      (t.additional_info && t.additional_info.toLowerCase().includes(q))
-    );
+    const rawQ = state.searchTerm.trim().toLowerCase();
+    const numQ = rawQ.replace(/[^0-9.]/g, ''); // Digits only for amounts/rows
+
+    list = list.filter((t) => {
+      // Amount match (normalized without commas)
+      const cleanAmt = String(t.amount || '').replace(/[^0-9.]/g, '');
+      const amtMatch = numQ.length > 0 && cleanAmt.includes(numQ);
+
+      // Row ID match (#118 or 118)
+      const rowMatch = numQ.length > 0 && String(t.row_id) === numQ;
+
+      // Text matches
+      const partMatch = t.particulars && t.particulars.toLowerCase().includes(rawQ);
+      const dateMatch = t.date && t.date.toLowerCase().includes(rawQ);
+      const infoMatch = t.additional_info && t.additional_info.toLowerCase().includes(rawQ);
+
+      return amtMatch || rowMatch || partMatch || dateMatch || infoMatch;
+    });
   }
 
   txCountEl.textContent = `${list.length} shown`;
@@ -420,12 +661,12 @@ function renderTransactionList() {
     let chipHtml = '';
     if (t.has_proof) {
       if (t.is_raw_url) {
-        chipHtml = `<span class="tx-chip chip-raw-url" title="Raw URL: click to fix">🔗 Raw Link</span>`;
+        chipHtml = `<span class="tx-chip chip-raw-url" title="Raw URL: click to update">🔴 Raw Link</span>`;
       } else {
-        chipHtml = `<span class="tx-chip chip-has-proof" title="${t.proof_value}">🟢 Has Proof</span>`;
+        chipHtml = `<span class="tx-chip chip-has-proof" title="${t.proof_value || ''}">🟢 Proof Attached</span>`;
       }
     } else {
-      chipHtml = `<span class="tx-chip chip-missing">🟠 Needs Proof</span>`;
+      chipHtml = `<span class="tx-chip chip-needs-proof">🟡 Needs Proof</span>`;
     }
 
     item.innerHTML = `
@@ -436,7 +677,7 @@ function renderTransactionList() {
           <span class="tx-amount">₹${t.amount || '0'}</span>
         </div>
         <div class="tx-row-sub">
-          <span>Row ${t.row_id} • ${t.date}</span>
+          <span>Row #${t.row_id} • ${t.date}</span>
           ${chipHtml}
         </div>
         ${t.additional_info ? `<div class="tx-extra-notes">${t.additional_info}</div>` : ''}
@@ -444,16 +685,77 @@ function renderTransactionList() {
     `;
     txList.appendChild(item);
   });
+
+  updateSelectedBanner();
+}
+
+function updateSelectedBanner() {
+  if (!selectedTxBanner) return;
+
+  if (!state.selectedRowId) {
+    selectedTxBanner.classList.add('hidden');
+    selectedTxBanner.innerHTML = '';
+    return;
+  }
+
+  const selectedTx = state.transactions.find(t => t.row_id === state.selectedRowId);
+  if (!selectedTx) {
+    selectedTxBanner.classList.add('hidden');
+    return;
+  }
+
+  selectedTxBanner.classList.remove('hidden');
+  if (selectedTx.has_proof) {
+    selectedTxBanner.className = 'selected-tx-banner has-proof';
+    selectedTxBanner.innerHTML = `
+      <strong>ℹ️ Existing Proof Linked:</strong> Row #${selectedTx.row_id} (${selectedTx.particulars} - ₹${selectedTx.amount}) already has proof file.
+      <br><span style="font-size:10px; color:#e2e8f0;">Stitching will merge new photos into an updated film roll and replace the old file in Google Drive.</span>
+    `;
+  } else {
+    selectedTxBanner.className = 'selected-tx-banner';
+    selectedTxBanner.innerHTML = `
+      <strong>Selected Target:</strong> Row #${selectedTx.row_id}: ${selectedTx.particulars} (₹${selectedTx.amount} on ${selectedTx.date}).
+    `;
+  }
 }
 
 function selectTransaction(rowId) {
   if (state.selectedRowId === rowId) {
     state.selectedRowId = null;
-    document.querySelector('input[name="tx-select"][value="auto"]').checked = true;
+    const autoRadio = document.querySelector('input[name="tx-select"][value="auto"]');
+    if (autoRadio) autoRadio.checked = true;
   } else {
     state.selectedRowId = rowId;
   }
   renderTransactionList();
+}
+
+// Filter Tab Click Handlers
+tabButtons.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    tabButtons.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.activeFilter = btn.getAttribute('data-filter') || 'all';
+    renderTransactionList();
+  });
+});
+
+// Search Input Listener
+txSearch.addEventListener('input', (e) => {
+  state.searchTerm = e.target.value;
+  if (btnClearSearch) {
+    btnClearSearch.classList.toggle('hidden', !state.searchTerm);
+  }
+  renderTransactionList();
+});
+
+if (btnClearSearch) {
+  btnClearSearch.addEventListener('click', () => {
+    txSearch.value = '';
+    state.searchTerm = '';
+    btnClearSearch.classList.add('hidden');
+    renderTransactionList();
+  });
 }
 
 document.querySelectorAll('input[name="tx-select"]').forEach((radio) => {
@@ -465,24 +767,13 @@ document.querySelectorAll('input[name="tx-select"]').forEach((radio) => {
   });
 });
 
-txSearch.addEventListener('input', (e) => {
-  state.searchTerm = e.target.value.trim();
-  renderTransactionList();
-});
-
-btnFilterUnlinked.addEventListener('click', () => {
-  state.filterUnlinkedOnly = !state.filterUnlinkedOnly;
-  btnFilterUnlinked.setAttribute('data-active', state.filterUnlinkedOnly ? 'true' : 'false');
-  renderTransactionList();
-});
-
 btnRefresh.addEventListener('click', async () => {
   showToast('Refreshing sheet records...');
   await loadTransactions();
 });
 
 // ============================================================================
-// 5. Processing & Linking Action
+// 6. Action Processing & 24/7 Cloud Linking
 // ============================================================================
 function updateProcessButtonState() {
   btnProcess.disabled = state.stagedFiles.length === 0 || state.isProcessing;
@@ -494,7 +785,7 @@ btnProcess.addEventListener('click', async () => {
   state.isProcessing = true;
   updateProcessButtonState();
   processLog.classList.remove('hidden');
-  logText.textContent = '1/4 Assembling film roll collage...';
+  logText.textContent = '1/4 Assembling vertical film roll...';
 
   try {
     const collageBlob = await renderCollageOnCanvas();
@@ -506,7 +797,7 @@ btnProcess.addEventListener('click', async () => {
     let result;
 
     if (isGAS) {
-      // 24/7 Cloud Google Apps Script Engine
+      // Google Apps Script 24/7 Engine
       const imagesBase64 = state.stagedFiles.map(f => f.dataUrl.split(',')[1]);
       const mimeTypes = state.stagedFiles.map(f => f.file.type || 'image/jpeg');
       let stitchedBase64 = null;
@@ -518,69 +809,66 @@ btnProcess.addEventListener('click', async () => {
       const payload = {
         action: "process_and_link",
         imagesBase64: imagesBase64,
-        mimeTypes: mimeTypes,
         stitchedImageBase64: stitchedBase64,
-        stitchedMime: "image/jpeg",
         userInstructions: userNotes.value.trim(),
-        tickedRowId: state.selectedRowId
+        tickedRowId: state.selectedRowId || null,
+        fileNames: state.stagedFiles.map(f => f.name)
       };
 
-      logText.textContent = '3/4 Uploading to Drive & updating Sheet...';
+      logText.textContent = '3/4 Uploading to Google Drive & updating sheet...';
 
-      const res = await fetch(backendUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      const resp = await fetch(backendUrl, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify(payload)
       });
-      result = await res.json();
+      result = await resp.json();
     } else {
-      // Local Flask Server
+      // Local Flask Fallback
       const formData = new FormData();
+      formData.append("count", state.stagedFiles.length);
+      formData.append("user_notes", userNotes.value.trim());
+      formData.append("ticked_row_id", state.selectedRowId || "");
+
       state.stagedFiles.forEach((item, idx) => {
-        formData.append(`raw_image_${idx}`, item.file);
+        formData.append(`file_${idx}`, item.file);
         formData.append(`category_${idx}`, item.category);
       });
-      formData.append('count', state.stagedFiles.length);
-      formData.append('stitched_collage', collageBlob, 'stitched_collage.jpg');
-      formData.append('user_notes', userNotes.value.trim());
 
-      if (state.selectedRowId) {
-        formData.append('forced_row_id', state.selectedRowId);
-      }
+      logText.textContent = '3/4 Uploading to Google Drive & updating sheet...';
 
-      logText.textContent = '3/4 Uploading & matching with Google Sheets...';
-
-      const res = await fetch('/api/process', {
-        method: 'POST',
+      const resp = await fetch("/api/process", {
+        method: "POST",
         body: formData
       });
-      result = await res.json();
+      result = await resp.json();
     }
 
-    if (!result.success) {
-      throw new Error(result.error || 'Processing failed');
-    }
+    logText.textContent = '4/4 Finalizing records...';
 
-    logText.textContent = '4/4 Complete! Updating UI...';
+    if (result && result.success) {
+      const match = result.match || {};
+      const statusMsg = match.is_backlog 
+        ? `📦 Saved to Pending Backlog (no matching row found)`
+        : `✅ Linked to Row ${match.matched_row_id}! Drive proof uploaded.`;
 
-    if (result.pending) {
-      showToast(`📦 Saved to Pending Backlog (Transaction not in Sheet yet).`, 'warning');
+      showToast(statusMsg, 5000);
+
+      // Clear staged photos upon successful upload
+      await clearStagedSession();
+      userNotes.value = '';
+      state.selectedRowId = null;
+
+      // Refresh data
+      await loadTransactions();
+      await loadPendingBacklog();
     } else {
-      showToast(`✅ Successfully linked proof to Row ${result.matched_row_id}!`, 'success');
+      throw new Error(result.error || 'Server processing error');
     }
-
-    // Reset staging
-    state.stagedFiles = [];
-    userNotes.value = '';
-    state.selectedRowId = null;
-    renderStagedList();
-
-    await loadTransactions();
-    await loadPendingBacklog();
 
   } catch (err) {
     console.error('Process error:', err);
-    showToast(`❌ Error: ${err.message}`, 'error');
+    showToast(`❌ Error: ${err.message}`, 6000);
   } finally {
     state.isProcessing = false;
     updateProcessButtonState();
@@ -589,16 +877,11 @@ btnProcess.addEventListener('click', async () => {
 });
 
 // ============================================================================
-// 6. Backlog Management
+// 7. Pending Backlog Management
 // ============================================================================
-backlogHeader.addEventListener('click', () => {
-  backlogBody.classList.toggle('hidden');
-});
-
 async function loadPendingBacklog() {
   const backendUrl = getBackendUrl();
   const isGAS = backendUrl.includes("script.google.com");
-
   try {
     let res, data;
     if (isGAS) {
@@ -610,60 +893,62 @@ async function loadPendingBacklog() {
     }
 
     if (data.success && Array.isArray(data.pending)) {
-      backlogCount.textContent = data.pending.length;
-      if (data.pending.length > 0) {
-        backlogList.innerHTML = '';
-        data.pending.forEach((item) => {
-          const div = document.createElement('div');
-          div.className = 'staged-item';
-          div.innerHTML = `
-            <div class="staged-meta">
-              <span class="staged-name">${item.file_name}</span>
-              <span class="staged-tag tag-upi">₹${item.amount || 'Pending'}</span>
-            </div>
-          `;
-          backlogList.appendChild(div);
-        });
-      } else {
-        backlogList.innerHTML = '<p class="empty-text">No pending receipts.</p>';
-      }
+      renderPendingBacklog(data.pending);
     }
   } catch (err) {
-    console.warn('Backlog load error:', err);
+    console.warn('Backlog load note:', err);
   }
 }
 
+function renderPendingBacklog(items) {
+  backlogCount.textContent = items.length;
+  if (items.length === 0) {
+    backlogList.innerHTML = '<p class="empty-text">No pending receipts.</p>';
+    return;
+  }
+
+  backlogList.innerHTML = '';
+  items.forEach((item) => {
+    const el = document.createElement('div');
+    el.className = 'backlog-item';
+    el.innerHTML = `
+      <div class="backlog-meta">
+        <strong>${item.file_name || 'Receipt'}</strong>
+        <span class="backlog-sub">₹${item.amount || 'Unknown'} • ${item.date || 'Pending'}</span>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="reconcileBacklogItem('${item.id}')">Link</button>
+    `;
+    backlogList.appendChild(el);
+  });
+}
+
+backlogHeader.addEventListener('click', () => {
+  backlogBody.classList.toggle('hidden');
+  document.getElementById('backlog-chevron').textContent = backlogBody.classList.contains('hidden') ? '▼' : '▲';
+});
+
 btnClearBacklog.addEventListener('click', async () => {
-  showToast('Reconciling pending receipts with Google Sheet...');
+  showToast('Reconciling backlog items with Google Sheet...');
   const backendUrl = getBackendUrl();
-  const isGAS = backendUrl.includes("script.google.com");
-
   try {
-    let res, data;
-    if (isGAS) {
-      res = await fetch(backendUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action: "clear_backlog" })
-      });
-      data = await res.json();
-    } else {
-      res = await fetch('/api/clear_backlog', { method: 'POST' });
-      data = await res.json();
-    }
-
+    const res = await fetch(backendUrl, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "clear_backlog" })
+    });
+    const data = await res.json();
     if (data.success) {
-      showToast(`⚡ ${data.message}`);
-      await loadPendingBacklog();
+      showToast(`⚡ ${data.message || 'Backlog reconciled successfully!'}`);
       await loadTransactions();
+      await loadPendingBacklog();
     }
   } catch (err) {
-    showToast(`Error: ${err.message}`, 'error');
+    showToast('Failed to reconcile backlog.');
   }
 });
 
 // ============================================================================
-// 7. Settings Modal Actions
+// 8. Settings Modal (Cloud URL Configuration)
 // ============================================================================
 btnSettings.addEventListener('click', () => {
   backendUrlInput.value = getBackendUrl();
@@ -674,39 +959,34 @@ btnCloseSettings.addEventListener('click', () => {
   settingsModal.classList.add('hidden');
 });
 
-btnSaveSettings.addEventListener('click', async () => {
-  const val = backendUrlInput.value.trim();
-  if (val) {
-    setBackendUrl(val);
-    showToast('Saved Cloud Engine URL! Re-syncing...');
-    settingsModal.classList.add('hidden');
-    await loadTransactions();
-  }
+btnSaveSettings.addEventListener('click', () => {
+  const newUrl = backendUrlInput.value.trim();
+  setBackendUrl(newUrl);
+  settingsModal.classList.add('hidden');
+  showToast('Settings saved. Refreshing sync...');
+  loadTransactions();
 });
 
-btnResetSettings.addEventListener('click', async () => {
+btnResetSettings.addEventListener('click', () => {
   setBackendUrl(DEFAULT_GAS_URL);
   backendUrlInput.value = DEFAULT_GAS_URL;
-  showToast('Reset to default Cloud Engine URL.');
   settingsModal.classList.add('hidden');
-  await loadTransactions();
+  showToast('Reset to default Cloud Engine.');
+  loadTransactions();
 });
 
-// Toast helper
-function showToast(message, type = '') {
+// ============================================================================
+// 9. Toast Notification Helper
+// ============================================================================
+function showToast(message, duration = 3000) {
   toastEl.textContent = message;
-  toastEl.className = `toast ${type ? 'toast-' + type : ''}`;
   toastEl.classList.remove('hidden');
+  toastEl.classList.add('show');
   setTimeout(() => {
-    toastEl.classList.add('hidden');
-  }, 4000);
+    toastEl.classList.remove('show');
+    setTimeout(() => toastEl.classList.add('hidden'), 300);
+  }, duration);
 }
 
-// ============================================================================
-// Initialization on page load
-// ============================================================================
-window.addEventListener('DOMContentLoaded', async () => {
-  await initServiceWorker();
-  await loadTransactions();
-  await loadPendingBacklog();
-});
+// Start application
+window.addEventListener('DOMContentLoaded', initApp);
