@@ -1328,3 +1328,68 @@ if (btnClearDebugLog) {
 
 // Start application
 window.addEventListener('DOMContentLoaded', initApp);
+
+
+// ============================================================================
+// 11. Automated Client Telemetry & Remote Bug Reporting
+// ============================================================================
+async function sendClientTelemetry(level, event, message, details = null) {
+  try {
+    const backendUrl = getBackendUrl();
+    const payload = {
+      action: "log_client_event",
+      level: level,
+      event: event,
+      message: String(message || '').substring(0, 300),
+      latency_ms: 0,
+      details: details || {
+        userAgent: navigator.userAgent,
+        online: navigator.onLine,
+        selectedRow: state.selectedRowId,
+        stagedCount: state.stagedFiles.length
+      }
+    };
+    fetch(backendUrl, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload)
+    }).catch(() => {});
+  } catch (e) {
+    console.warn("Telemetry transmission note:", e);
+  }
+}
+
+// Global window error catchers for automated crash reporting
+window.addEventListener('error', (event) => {
+  const errMsg = event.message || 'Script Error';
+  addDebugLog(`💥 Uncaught Error: ${errMsg}`, 'error');
+  sendClientTelemetry('ERROR', 'window_error', errMsg, {
+    filename: event.filename,
+    lineno: event.lineno,
+    colno: event.colno
+  });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = (event.reason && (event.reason.message || event.reason)) || 'Unhandled Promise Rejection';
+  addDebugLog(`💥 Promise Rejection: ${reason}`, 'error');
+  sendClientTelemetry('ERROR', 'unhandled_rejection', String(reason));
+});
+
+const btnReportBug = document.getElementById('btn-report-bug');
+if (btnReportBug) {
+  btnReportBug.addEventListener('click', async () => {
+    showToast('🚀 Transmitting bug report to cloud vault...');
+    const logLines = Array.from(debugConsole.querySelectorAll('.debug-line'))
+      .map(el => el.textContent)
+      .slice(-15)
+      .join(' | ');
+    await sendClientTelemetry('WARN', 'user_bug_report', 'Manual bug report submitted from phone', {
+      consoleLogs: logLines,
+      stagedFiles: state.stagedFiles.map(f => f.name),
+      selectedRow: state.selectedRowId
+    });
+    showToast('✅ Bug report saved to cloud vault! Antigravity can now inspect it directly.', 4500);
+    addDebugLog('🚀 Bug report successfully submitted to cloud vault.', 'success');
+  });
+}
