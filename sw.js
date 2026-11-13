@@ -3,7 +3,7 @@
  * Intercepts Web Share Target POST requests from Android OS and manages offline caching.
  */
 
-const CACHE_NAME = 'mugdiya-receipts-v2.8';
+const CACHE_NAME = 'mugdiya-receipts-v2.9';
 const ASSETS_TO_CACHE = [
   './',
   'index.html',

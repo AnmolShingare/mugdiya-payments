@@ -1065,6 +1065,10 @@ btnProcess.addEventListener('click', async () => {
       if (result.pending) {
         showToast('📦 Saved to Pending Backlog (no matching row found in sheet)', 6000);
         addDebugLog('📦 Server saved proof to Pending Backlog (no matching row found in sheet)', 'warning');
+      } else if (result.is_multi_transaction_register && result.linked_rows && result.linked_rows.length > 0) {
+        const rowsStr = result.linked_rows.join(', ');
+        showToast(`📑 Multi-Voucher Linked! Updated ${result.linked_rows.length} rows (${rowsStr}) simultaneously!`, 8000);
+        addDebugLog(`📑 Multi-Transaction Voucher Register successfully linked across ${result.linked_rows.length} rows: ${rowsStr}! File: ${result.file_name}`, 'success');
       } else {
         const rowId = result.matched_row_id;
         showToast(`✅ Linked to Row ${rowId}! Drive proof uploaded.`, 6000);
