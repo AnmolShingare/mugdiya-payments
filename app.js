@@ -138,7 +138,8 @@ async function saveStagedSession() {
         category: item.category,
         dataUrl: item.dataUrl,
         type: item.file ? item.file.type : 'image/jpeg',
-        rotation: item.rotation || 0
+        rotation: item.rotation || 0,
+        isExistingProof: Boolean(item.isExistingProof)
       });
     }
   } catch (err) {
@@ -164,6 +165,7 @@ async function loadStagedSession() {
         category: item.category,
         dataUrl: item.dataUrl,
         rotation: item.rotation || 0,
+        isExistingProof: Boolean(item.isExistingProof),
         file: dataURLtoFile(item.dataUrl, item.name)
       }));
       renderStagedList();
@@ -856,34 +858,8 @@ async function selectTransaction(rowId) {
     state.selectedRowId = rowId;
     const tx = state.transactions.find(t => t.row_id === rowId);
     if (tx && tx.has_proof) {
-      state.stagedFiles = state.stagedFiles.filter(f => !f.isExistingProof);
-      addDebugLog(`🔍 Row #${rowId} has an existing proof in Sheet. Loading it for merged film roll...`, 'info');
-      showToast(`📥 Loading existing proof from Row #${rowId} to merge...`, 3000);
-      try {
-        const backendUrl = getBackendUrl();
-        const resp = await fetch(`${backendUrl}?action=get_proof_image&row_id=${rowId}`);
-        const data = await resp.json();
-        if (data && data.success && data.data_url) {
-          const proofFile = dataURLtoFile(data.data_url, data.file_name || 'Existing_Proof.jpg');
-          state.stagedFiles.push({
-            id: 'existing-proof-' + rowId,
-            file: proofFile,
-            name: data.file_name || 'Existing Payment Proof.jpg',
-            dataUrl: data.data_url,
-            category: 'UPI_SCREENSHOT',
-            isExistingProof: true,
-            sourceRowId: rowId
-          });
-          renderStagedList();
-          addDebugLog(`✅ Existing proof loaded as Card #2! Both will be stitched into a unified film roll.`, 'success');
-          showToast(`✅ Existing proof loaded! Both will be merged into a single film roll.`, 4000);
-        }
-      } catch (e) {
-        addDebugLog(`Notice: Could not load existing proof: ${e.message}`, 'warning');
-      }
-    } else {
-      state.stagedFiles = state.stagedFiles.filter(f => !f.isExistingProof);
-      renderStagedList();
+      showToast(`ℹ️ Row #${rowId} already has proof. Additional files will be automatically merged into a single unified film roll!`, 4000);
+      addDebugLog(`ℹ️ Row #${rowId} has existing proof. Merge handshake will automatically stitch them on upload.`, 'info');
     }
   }
   renderTransactionList();
@@ -979,6 +955,7 @@ btnProcess.addEventListener('click', async () => {
         stitchedBase64 = collageDataUrl.split(',')[1];
       }
 
+      const hasExistingStaged = state.stagedFiles.some(f => f.isExistingProof);
       const payload = {
         action: "process_and_link",
         imagesBase64: imagesBase64,
@@ -986,7 +963,9 @@ btnProcess.addEventListener('click', async () => {
         userInstructions: userNotes.value.trim(),
         tickedRowId: state.selectedRowId || null,
         fileNames: state.stagedFiles.map(f => f.name),
-        useAi: state.aiActive
+        useAi: state.aiActive,
+        isExistingProofIncluded: hasExistingStaged,
+        skipMergeHandshake: Boolean(isAutoRetry || hasExistingStaged)
       };
 
       logText.textContent = '3/4 Uploading to Google Drive & updating sheet...';
